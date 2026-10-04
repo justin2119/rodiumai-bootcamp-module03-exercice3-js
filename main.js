@@ -6,16 +6,42 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 
 const require = createRequire(import.meta.url);
-let SDK = await import('rodiumai');
+const SDK = await import('rodiumai');
 const RodiumAI = SDK.default ?? SDK.RodiumAI ?? SDK;
-const client = new RodiumAI({ apiKey: process.env.RODIUMAI_API_KEY });
+const client = typeof RodiumAI === 'function' ? new RodiumAI({ apiKey: process.env.RODIUMAI_API_KEY }) : RodiumAI;
 const rl = createInterface({ input, output });
 const steps = ['Chat', 'Image', 'Vidéo'];
 const model = (key, fallback) => process.env[key] || fallback;
+const API_BASE = (process.env.RODIUMAI_BASE_URL || 'https://api.rodiumai.io/v1').replace(/\/$/, '');
 
 function get(obj, ...keys) {
   for (const key of keys) if (obj?.[key] != null) return obj[key];
   return undefined;
+}
+
+async function apiRequest(path, body) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.RODIUMAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload?.error?.message || payload?.message || `HTTP ${response.status}`;
+    const error = new Error(message);
+    error.name = payload?.error?.type || payload?.error?.code || 'RodiumAPIError';
+    throw error;
+  }
+  return payload;
+}
+
+async function callFirst(candidates, args, fallback) {
+  for (const [target, method] of candidates) {
+    const fn = typeof method === 'function' ? method : target?.[method];
+    if (typeof fn === 'function') return fn.call(target, args);
+  }
+  // Use the documented HTTP API when this installed SDK version lacks a recognized method.
+  return fallback();
 }
 
 async function saveResult(value, base) {
@@ -45,44 +71,45 @@ async function saveResult(value, base) {
   console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
 }
 
-async function invoke(target, methods, args) {
-  for (const method of methods) {
-    const fn = target?.[method];
-    if (typeof fn === 'function') return fn.call(target, args);
-  }
-  throw new Error(`Méthode SDK indisponible (${methods.join(', ')}). Vérifiez la version du SDK.`);
-}
-
 async function runStep(index) {
   const prompt = (await rl.question(`\n${steps[index]} — votre demande : `)).trim();
   if (!prompt) { console.log('La demande est vide.'); return; }
   try {
     if (index === 0) {
-      const chat = client.chat;
-      const result = await invoke(chat, ['create'], {
-        model: model('RODIUMAI_CHAT_MODEL', 'rodium/auto'),
-        messages: [{ role: 'user', content: prompt }],
-      });
+      const payload = { model: model('RODIUMAI_CHAT_MODEL', 'rodium/auto'), messages: [{ role: 'user', content: prompt }] };
+      const chat = client?.chat;
+      const result = await callFirst([
+        [chat?.completions, 'create'],
+        [chat, 'create'],
+        [null, typeof chat === 'function' ? chat : undefined],
+        [client, 'createChatCompletion'],
+        [client?.completions, 'create'],
+      ], payload, () => apiRequest('/chat/completions', payload));
       console.log('\nRéponse :');
       console.log(get(get(result, 'choices')?.[0], 'message')?.content ?? get(result, 'output', 'content') ?? JSON.stringify(result, null, 2));
     } else if (index === 1) {
-      const images = client.images;
-      const result = await invoke(images, ['generate', 'create'], {
-        model: model('RODIUMAI_IMAGE_MODEL', 'openai/gpt-image-1.5'), prompt,
-      });
+      const payload = { model: model('RODIUMAI_IMAGE_MODEL', 'openai/gpt-image-1.5'), prompt };
+      const images = client?.images ?? client?.image;
+      const result = await callFirst([
+        [images, 'generate'], [images, 'create'],
+        [client, 'generateImage'], [client, 'createImage'],
+      ], payload, () => apiRequest('/images/generations', payload));
       const item = get(result, 'data', 'images')?.[0] ?? result;
       await saveResult(get(item, 'b64_json', 'url', 'image_url', 'content'), 'image');
     } else {
-      const videos = client.videos ?? client.video?.generations;
-      const result = await invoke(videos, ['generate', 'create'], {
-        model: model('RODIUMAI_VIDEO_MODEL', 'google/veo-3.1-lite'), prompt,
-      });
+      const payload = { model: model('RODIUMAI_VIDEO_MODEL', 'google/veo-3.1-lite'), prompt };
+      const videos = client?.videos ?? client?.video?.generations ?? client?.video;
+      const result = await callFirst([
+        [videos, 'generate'], [videos, 'create'],
+        [client, 'generateVideo'], [client, 'createVideo'],
+      ], payload, () => apiRequest('/videos/generations', payload));
       const item = get(result, 'data', 'videos')?.[0] ?? result;
       await saveResult(get(item, 'url', 'video_url', 'output_url') ?? JSON.stringify(result), 'video');
     }
   } catch (error) {
     const name = error?.name ?? 'Error';
     const hints = {
+      InsufficientRODIError: 'Crédits RODI insuffisants pour cette opération : vérifiez le solde et le coût du modèle dans votre compte RodiumAI.',
       InsufficientBalanceError: 'Solde insuffisant : vérifiez votre compte RodiumAI.',
       InvalidAPIKeyError: 'Clé API invalide : vérifiez RODIUMAI_API_KEY dans .env.',
       AuthenticationError: 'Authentification refusée : vérifiez votre clé API.',

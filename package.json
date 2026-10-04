@@ -1,0 +1,14 @@
+{
+  "name": "rodiumai-bootcamp-module03-exercice3-js",
+  "version": "1.0.0",
+  "description": "Exercice 3 : Script interactif avec le SDK RodiumAI JavaScript/Node.js",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "rodiumai": "latest"
+  }
+}
